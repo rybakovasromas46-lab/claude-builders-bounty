@@ -1,0 +1,138 @@
+{
+  "name": "Weekly GitHub Dev Summary",
+  "nodes": [
+    {
+      "id": "7f6aef08-20e9-4e7c-a2bd-0745aa509ed8",
+      "name": "Weekly Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                5
+              ],
+              "triggerAtHour": 17
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "6c68c700-d75c-4958-bc4d-81c35d212cc3",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        450,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const repo = 'octocat/Hello-World'; // CHANGE THIS\nconst language = 'EN'; // EN or FR\nconst slackWebhook = 'https://example.invalid/slack-webhook'; // CHANGE THIS\nconst githubToken = ''; // Optional for public repos\nconst anthropicKey = ''; // CHANGE THIS; never commit real keys\nif (!/^[\\w.-]+\\/[\\w.-]+$/.test(repo)) throw Error('Invalid owner/repo');\nif (!['EN','FR'].includes(language)) throw Error('Language must be EN or FR');\nif (!anthropicKey || slackWebhook.includes('example.invalid')) throw Error('Configure credentials before executing');\nreturn [{json:{repo,language,slackWebhook,githubToken,anthropicKey,since:new Date(Date.now()-7*86400000).toISOString()}}];"
+      }
+    },
+    {
+      "id": "5e4fdf66-4d8f-4abf-9090-aecbf5d8076d",
+      "name": "Collect GitHub Activity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const c = $('Configuration').first().json;\nconst headers = {'Accept':'application/vnd.github+json','User-Agent':'weekly-dev-summary'};\nif (c.githubToken) headers.Authorization = 'Bearer ' + c.githubToken;\nasync function pages(endpoint, params) {\n  const all=[];\n  for(let page=1;page<=20;page++) {\n    const query=new URLSearchParams({...params,per_page:'100',page:String(page)}).toString();\n    const data=await this.helpers.httpRequest({method:'GET',url:'https://api.github.com/repos/'+c.repo+'/'+endpoint+'?'+query,headers,json:true});\n    if(!Array.isArray(data))throw Error('Unexpected GitHub API response');\n    all.push(...data);\n    if(data.length<100)return all;\n  }\n  throw Error('GitHub result exceeded 20 pages; narrow time window');\n}\nconst [commits,issues,pulls]=await Promise.all([\n  pages.call(this,'commits',{since:c.since}),\n  pages.call(this,'issues',{state:'closed',since:c.since}),\n  pages.call(this,'pulls',{state:'closed',sort:'updated',direction:'desc'})\n]);\nreturn [{json:{...c,\n  commits:commits.map(x=>({sha:x.sha.slice(0,7),message:x.commit.message.split('\\n')[0]})),\n  issues:issues.filter(x=>!x.pull_request&&x.closed_at>=c.since).map(x=>({number:x.number,title:x.title})),\n  pulls:pulls.filter(x=>x.merged_at&&x.merged_at>=c.since).map(x=>({number:x.number,title:x.title}))\n}}];"
+      }
+    },
+    {
+      "id": "c17f89b8-0bdc-4ba0-bd18-97806db28013",
+      "name": "Generate Claude Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        950,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const d=$input.first().json;\nconst prompt=`Write a factual weekly development summary for ${d.repo} in ${d.language==='FR'?'French':'English'}. Include commits, closed issues, merged pull requests, and key highlights. Do not invent details. Data: ${JSON.stringify({commits:d.commits,issues:d.issues,pulls:d.pulls})}`;\nconst result=await this.helpers.httpRequest({method:'POST',url:'https://api.anthropic.com/v1/messages',headers:{'x-api-key':d.anthropicKey,'anthropic-version':'2023-06-01','content-type':'application/json'},body:{model:'claude-sonnet-4-5',max_tokens:1200,messages:[{role:'user',content:prompt}]},json:true});\nconst text=result.content.filter(x=>x.type==='text').map(x=>x.text).join('\\n');\nif(!text)throw Error('Empty Claude response');\nreturn [{json:{slackWebhook:d.slackWebhook,text}}];"
+      }
+    },
+    {
+      "id": "3e564daa-dc7b-41f0-9e41-7d8f414da6ac",
+      "name": "Send Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.slackWebhook }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({text: $json.text}) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Weekly Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Collect GitHub Activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect GitHub Activity": {
+      "main": [
+        [
+          {
+            "node": "Generate Claude Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Claude Summary": {
+      "main": [
+        [
+          {
+            "node": "Send Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}
